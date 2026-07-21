@@ -71,6 +71,17 @@ public struct TrainedTapClassifier: Codable, Equatable, Sendable {
     public var linearZoneModel: RegularizedLinearZoneModel?
     public var minimumConfidence: Double
 
+    public var featureSchemaVersion: Int {
+        positiveExamples.first?.feature.version ?? 0
+    }
+
+    public var usesCurrentFeatureSchema: Bool {
+        let examples = positiveExamples + negativeExamples
+        return !examples.isEmpty && examples.allSatisfy {
+            $0.feature.version == TapFeatureVector.schemaVersion
+        }
+    }
+
     public static func train(
         positiveExamples: [LabeledTap],
         negativeExamples: [LabeledTap] = [],
@@ -83,9 +94,12 @@ public struct TrainedTapClassifier: Codable, Equatable, Sendable {
         guard let first = positives.first else { throw ClassifierTrainingError.notEnoughSamples }
         let names = first.feature.names
         let strategy = first.feature.strategy
+        let featureVersion = first.feature.version
         let allExamples = positives + negativeExamples
         guard !names.isEmpty,
+              featureVersion == TapFeatureVector.schemaVersion,
               allExamples.allSatisfy({
+                  $0.feature.version == featureVersion &&
                   $0.feature.names == names &&
                   $0.feature.values.count == names.count &&
                   $0.feature.strategy == strategy
@@ -160,7 +174,8 @@ public struct TrainedTapClassifier: Codable, Equatable, Sendable {
     }
 
     public func predict(_ feature: TapFeatureVector) -> ClassificationDecision {
-        guard feature.strategy == strategy,
+        guard feature.version == featureSchemaVersion,
+              feature.strategy == strategy,
               feature.names == featureNames,
               feature.values.count == center.count else {
             return rejected(feature, reason: .schemaMismatch)

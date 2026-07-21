@@ -46,6 +46,25 @@ final class ClassifierTests: XCTestCase {
         var mismatched = feature(zone: .leftBottom)
         mismatched.names[0] = "other"
         XCTAssertEqual(classifier.predict(mismatched).rejectionReason, .schemaMismatch)
+
+        var legacyFraming = feature(zone: .leftBottom)
+        legacyFraming.version = TapFeatureVector.schemaVersion - 1
+        XCTAssertEqual(classifier.predict(legacyFraming).rejectionReason, .schemaMismatch)
+        XCTAssertTrue(classifier.usesCurrentFeatureSchema)
+
+        var legacyClassifier = classifier
+        for index in legacyClassifier.positiveExamples.indices {
+            legacyClassifier.positiveExamples[index].feature.version = TapFeatureVector.schemaVersion - 1
+        }
+        XCTAssertFalse(legacyClassifier.usesCurrentFeatureSchema)
+        XCTAssertEqual(
+            legacyClassifier.predict(feature(zone: .leftBottom)).rejectionReason,
+            .schemaMismatch
+        )
+
+        var mixedClassifier = classifier
+        mixedClassifier.positiveExamples[mixedClassifier.positiveExamples.indices.last!].feature.version -= 1
+        XCTAssertFalse(mixedClassifier.usesCurrentFeatureSchema)
     }
 
     func testClassifierRejectsCalibratedNegativeExample() throws {

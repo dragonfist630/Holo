@@ -18,7 +18,10 @@ public enum GuidedCaptureQualityIssue: String, Codable, Equatable, Sendable {
 }
 
 public enum GuidedCaptureQuality {
-    public static let minimumSignalToNoiseDB = 7.0
+    // Match the live classifier boundary. A separate, stricter calibration
+    // threshold selected for hard taps and taught the model to reject the
+    // comfortable force users actually want to use.
+    public static let minimumSignalToNoiseDB = SignalQuality.minimumClassificationSignalToNoiseDB
     public static let minimumPeakAmplitude = SignalQuality.minimumReliablePeakAmplitude
     public static let maximumClippingFraction = SignalQuality.maximumReliableClippingFraction
 

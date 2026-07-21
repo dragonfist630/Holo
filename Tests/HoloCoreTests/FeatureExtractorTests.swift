@@ -21,6 +21,38 @@ final class FeatureExtractorTests: XCTestCase {
         XCTAssertGreaterThan(high.values[centroidIndex], low.values[centroidIndex])
     }
 
+    func testComfortableShortTapQualityIsNotDilutedAcrossNinetyMilliseconds() {
+        let sampleRate = 48_000.0
+        let onset = 576
+        let count = Int(sampleRate * 0.09)
+        let samples: [Float] = (0..<count).map { index in
+            let absoluteTime = Double(index) / sampleRate
+            let background = 0.0028 * sin(2 * .pi * 173 * absoluteTime)
+                + 0.0021 * sin(2 * .pi * 419 * absoluteTime + 0.4)
+            guard index >= onset else { return Float(background) }
+            let time = Double(index - onset) / sampleRate
+            let impact = 0.008 * exp(-time * 2_200) * cos(2 * .pi * 1_900 * time)
+            let resonance = 0.0022 * exp(-time * 32) * sin(2 * .pi * 680 * time)
+            return Float(background + impact + resonance)
+        }
+        let event = DetectedTap(
+            channels: [samples],
+            onsetOffset: onset,
+            streamSampleIndex: 0,
+            noiseFloorRMS: 0.003
+        )
+
+        let feature = TapFeatureExtractor(sampleRate: sampleRate, strategy: .passive)
+            .extract(from: event)
+
+        XCTAssertGreaterThanOrEqual(
+            feature.quality.signalToNoiseDB,
+            GuidedCaptureQuality.minimumSignalToNoiseDB
+        )
+        XCTAssertNil(GuidedCaptureQuality.issue(for: feature.quality))
+        XCTAssertLessThan(feature.quality.rmsAmplitude, feature.quality.peakAmplitude)
+    }
+
     func testAllStrategiesHaveStableSchemas() {
         let event = makeEvent(frequency: 1_200)
         let passive = TapFeatureExtractor(sampleRate: 48_000, strategy: .passive).extract(from: event)

@@ -10,6 +10,7 @@ enum ImpactEventGate {
         var effectiveDurationSeconds: Double
         var earlyEnergyFraction: Double
         var lateToImpactRMS: Double
+        var isShortPlateau: Bool
     }
 
     static func accepts(_ event: DetectedTap, sampleRate: Double) -> Bool {
@@ -18,7 +19,8 @@ enum ImpactEventGate {
         // A contact impact should emerge clearly from the immediately preceding
         // audio. This removes most consonant peaks that occur in the middle of
         // continuous speech without requiring a general-purpose speech model.
-        guard metrics.onsetContrast >= 1.8 else { return false }
+        guard metrics.onsetContrast >= 1.1 else { return false }
+        guard !metrics.isShortPlateau else { return false }
 
         // Effective duration at 40% of the peak envelope is a common
         // percussive-versus-sustained cue. Requiring all three sustained cues
@@ -78,11 +80,13 @@ enum ImpactEventGate {
         let impactSearchEnd = min(onset + impactSearchFrames * frameSamples, filtered.count)
         let impactPeak = filtered[onset..<impactSearchEnd].map(abs).max() ?? 0
         // A fingertip impact may be only a few samples wide, especially over
-        // elevated broadband room noise. Preserve those candidates even when
-        // their 5 ms RMS is diluted by using a conservative peak alternative.
+        // elevated broadband room noise. Peak-to-pre-onset RMS is the useful
+        // contrast for that case; scaling the peak down here recreated a hidden
+        // effective arm threshold after the streaming detector had already
+        // accepted a candidate.
         let onsetContrast = max(
             impactRMS / referenceFloor,
-            0.45 * impactPeak / referenceFloor
+            impactPeak / referenceFloor
         )
 
         let effectiveThreshold = max(impactRMS * 0.40, event.noiseFloorRMS * 2.2)
@@ -90,6 +94,16 @@ enum ImpactEventGate {
             partial + (item.0 >= effectiveThreshold ? item.1 : 0)
         }
         let effectiveDuration = Double(effectiveSamples) / sampleRate
+
+        // A short abruptly-started tone can end before the 40 ms sustained
+        // boundary. Its first four 5 ms frames form a flat plateau, unlike the
+        // decaying envelope of a rounded desk ring. Treat that plateau as
+        // sustained without imposing any 1–3 ms shape on genuine taps.
+        let plateauFrames = Array(frameRMS.prefix(min(frameRMS.count, 4)))
+        let plateauCount = plateauFrames.filter { $0 >= impactRMS * 0.75 }.count
+        let isShortPlateau = plateauFrames.count >= 3
+            && plateauCount >= 3
+            && effectiveDuration >= 0.012
 
         let earlyEnd = min(onset + Int(sampleRate * 0.025), filtered.count)
         let totalEnergy = energy(filtered[onset..<filtered.count])
@@ -102,7 +116,8 @@ enum ImpactEventGate {
             onsetContrast: onsetContrast,
             effectiveDurationSeconds: effectiveDuration,
             earlyEnergyFraction: earlyEnergyFraction,
-            lateToImpactRMS: lateRMS / max(impactRMS, 1e-12)
+            lateToImpactRMS: lateRMS / max(impactRMS, 1e-12),
+            isShortPlateau: isShortPlateau
         )
     }
 

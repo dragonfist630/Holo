@@ -58,6 +58,7 @@ public enum SensingStrategy: String, CaseIterable, Codable, Sendable, Identifiab
 }
 
 public enum RejectionReason: String, Codable, Sendable, Equatable {
+    case missedDetection
     case weakSignal
     case lowSignalToNoise
     case clippedSignal
@@ -69,6 +70,7 @@ public enum RejectionReason: String, Codable, Sendable, Equatable {
 
     public var displayName: String {
         switch self {
+        case .missedDetection: return "Tap not detected"
         case .weakSignal: return "Signal too weak"
         case .lowSignalToNoise: return "Background noise too high"
         case .clippedSignal: return "Signal clipped"

@@ -65,12 +65,53 @@ public struct CalibrationSession: Sendable {
     }
 }
 
+public enum EvaluationAttemptPhase: Equatable, Sendable {
+    case ready
+    case preparing(UUID)
+    case listening(UUID)
+    case resolving(UUID)
+
+    public var id: UUID? {
+        switch self {
+        case .ready: return nil
+        case .preparing(let id), .listening(let id), .resolving(let id): return id
+        }
+    }
+
+    public var isInFlight: Bool { id != nil }
+}
+
+public enum EvaluationAttemptTiming {
+    /// Exceeds the detector's 0.75-second room-learning period, including a
+    /// callback margin when evaluation starts a fresh audio engine.
+    public static let preparationSeconds = 1.0
+    public static let listeningSeconds = 1.50
+    public static let processingGraceSeconds = 0.25
+}
+
+public struct EvaluationAttemptWindow: Equatable, Sendable {
+    public let id: UUID
+    public let openedAtUptime: Double
+    public let closesAtUptime: Double
+
+    public init(id: UUID, openedAtUptime: Double, closesAtUptime: Double) {
+        self.id = id
+        self.openedAtUptime = openedAtUptime
+        self.closesAtUptime = closesAtUptime
+    }
+
+    public func contains(eventHostTimeSeconds: Double) -> Bool {
+        eventHostTimeSeconds.isFinite
+            && eventHostTimeSeconds >= openedAtUptime
+            && eventHostTimeSeconds <= closesAtUptime
+    }
+}
+
 public struct EvaluationSession: Sendable {
     public let startedAt: Date
     public let targetPerZone: Int
     public var records: [EvaluationRecord]
-    public var isArmed: Bool
-    public var isSettling: Bool
+    public var attemptPhase: EvaluationAttemptPhase
 
     public init(
         startedAt: Date = Date(),
@@ -79,8 +120,7 @@ public struct EvaluationSession: Sendable {
         self.startedAt = startedAt
         self.targetPerZone = targetPerZone
         self.records = []
-        self.isArmed = false
-        self.isSettling = false
+        self.attemptPhase = .ready
     }
 
     public var currentZone: DeskZone? {
@@ -91,6 +131,65 @@ public struct EvaluationSession: Sendable {
 
     public var progress: Double {
         Double(records.count) / Double(targetPerZone * DeskZone.allCases.count)
+    }
+
+    @discardableResult
+    public mutating func beginAttempt(id: UUID = UUID()) -> UUID? {
+        guard attemptPhase == .ready, currentZone != nil else { return nil }
+        attemptPhase = .preparing(id)
+        return id
+    }
+
+    @discardableResult
+    public mutating func beginListening(id: UUID) -> Bool {
+        guard attemptPhase == .preparing(id) else { return false }
+        attemptPhase = .listening(id)
+        return true
+    }
+
+    @discardableResult
+    public mutating func beginResolving(id: UUID) -> Bool {
+        guard attemptPhase == .listening(id) else { return false }
+        attemptPhase = .resolving(id)
+        return true
+    }
+
+    public func acceptsObservation(
+        in window: EvaluationAttemptWindow,
+        eventHostTimeSeconds: Double
+    ) -> Bool {
+        let activeID: UUID?
+        switch attemptPhase {
+        case .listening(let id), .resolving(let id): activeID = id
+        case .ready, .preparing: activeID = nil
+        }
+        return activeID == window.id
+            && window.contains(eventHostTimeSeconds: eventHostTimeSeconds)
+    }
+
+    @discardableResult
+    public mutating func completeAttempt(id: UUID) -> Bool {
+        guard attemptPhase == .listening(id) || attemptPhase == .resolving(id) else {
+            return false
+        }
+        attemptPhase = .ready
+        return true
+    }
+
+    @discardableResult
+    public mutating func record(
+        _ record: EvaluationRecord,
+        forAttempt id: UUID
+    ) -> Bool {
+        guard record.expectedZone == currentZone, completeAttempt(id: id) else {
+            return false
+        }
+        records.append(record)
+        return true
+    }
+
+    public mutating func cancelAttempt() {
+        attemptPhase = .ready
     }
 }
 

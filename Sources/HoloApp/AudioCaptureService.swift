@@ -56,6 +56,7 @@ final class AudioCaptureService: ObservableObject {
     @Published private(set) var permissionGranted = false
     @Published private(set) var liveLevel: Double = 0
     @Published private(set) var diagnostics = MicrophoneDiagnostics()
+    @Published private(set) var detectorStatistics = TapDetectorStatistics()
     @Published private(set) var strategy: SensingStrategy = .passive
     @Published var lastError: String?
 
@@ -217,6 +218,7 @@ final class AudioCaptureService: ObservableObject {
             microphonePermissionGranted: true
         )
         lastError = nil
+        detectorStatistics = TapDetectorStatistics()
         isListening = true
         observeConfigurationChanges(for: engine)
     }
@@ -247,6 +249,14 @@ final class AudioCaptureService: ObservableObject {
         }
         isListening = false
         liveLevel = 0
+        detectorStatistics = TapDetectorStatistics()
+    }
+
+    func resetDetectorStatistics() {
+        processingQueue.sync {
+            detector?.resetStatistics()
+        }
+        detectorStatistics = TapDetectorStatistics()
     }
 
     func reconfigure(strategy: SensingStrategy) async throws {
@@ -371,6 +381,7 @@ final class AudioCaptureService: ObservableObject {
         let events = detector.process(channels: channels)
 
         if callbackCounter.isMultiple(of: 8) {
+            let detectorStatistics = detector.statistics
             let expected = Double(frameCount) / sampleRate * 1_000
             let timingSnapshot = timing.diagnostics(
                 expectedMilliseconds: expected,
@@ -382,6 +393,7 @@ final class AudioCaptureService: ObservableObject {
                       self.isListening else { return }
                 self.liveLevel = min(max((20 * log10(max(rms, 1e-8)) + 70) / 70, 0), 1)
                 self.diagnostics.timing = timingSnapshot
+                self.detectorStatistics = detectorStatistics
             }
         }
 

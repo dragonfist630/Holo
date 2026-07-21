@@ -203,6 +203,21 @@ struct CalibrationView: View {
                 .accessibilityValue("\(quality.summary). \(String(format: "%.1f", quality.signalToNoiseDB)) decibels signal to noise.")
             }
 
+            let detectorStatistics = model.audio.detectorStatistics
+            Text(
+                "Detector: \(detectorStatistics.candidateCount) candidates • "
+                    + "\(detectorStatistics.pendingRejectedCount + detectorStatistics.impactRejectedCount) filtered • "
+                    + "\(detectorStatistics.emittedCount) tap windows"
+            )
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .accessibilityLabel("Tap detector status")
+            .accessibilityValue(
+                "\(detectorStatistics.candidateCount) candidates, "
+                    + "\(detectorStatistics.pendingRejectedCount + detectorStatistics.impactRejectedCount) filtered, "
+                    + "\(detectorStatistics.emittedCount) tap windows"
+            )
+
             HStack {
                 Button("Undo", systemImage: "arrow.uturn.backward") {
                     model.undoLastCalibrationTap()

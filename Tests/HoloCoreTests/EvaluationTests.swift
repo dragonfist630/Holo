@@ -53,6 +53,115 @@ final class EvaluationTests: XCTestCase {
         XCTAssertEqual(report.rejectedPerZone[DeskZone.leftBottom.rawValue], 1)
     }
 
+    func testMissedDetectionCountsAsAnIncorrectAttemptWithInvalidLatency() {
+        let decision = ClassificationDecision(
+            zone: nil,
+            confidence: 0,
+            signalStrength: 0,
+            zoneDistances: [],
+            rejectionReason: .missedDetection
+        )
+        let record = EvaluationRecord(
+            expectedZone: .leftTop,
+            decision: decision,
+            responseLatencyMilliseconds: AudioTimeline.invalidElapsedMilliseconds
+        )
+        let report = EvaluationReport(
+            profileName: "Miss fixture",
+            strategy: .passive,
+            startedAt: Date(),
+            records: [record]
+        )
+
+        XCTAssertEqual(report.overallAccuracy, 0)
+        XCTAssertEqual(report.missedDetectionCount, 1)
+        XCTAssertEqual(report.classifierRejectionCount, 0)
+        XCTAssertFalse(report.hasCompleteResponseLatency)
+        XCTAssertTrue(report.csv().contains("missedDetection"))
+        XCTAssertTrue(report.csv().contains("INVALID"))
+    }
+
+    func testEvaluationJSONPersistsFeatureOnlyReplayEvidence() throws {
+        let capturedAt = Date(timeIntervalSince1970: 1_700_000_050)
+        let feature = TapFeatureVector(
+            strategy: .passive,
+            names: ["signature"],
+            values: [0.42],
+            quality: SignalQuality(
+                signalToNoiseDB: 18,
+                peakAmplitude: 0.08,
+                rmsAmplitude: 0.02,
+                clippingFraction: 0,
+                noiseFloorRMS: 0.0005,
+                durationMilliseconds: 90
+            ),
+            capturedAt: capturedAt
+        )
+        let decision = ClassificationDecision(
+            zone: .rightBottom,
+            confidence: 0.8,
+            signalStrength: 0.7,
+            zoneDistances: [],
+            rejectionReason: nil
+        )
+        let report = EvaluationReport(
+            calibrationCapturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            profileName: "Replay fixture",
+            strategy: .passive,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            records: [EvaluationRecord(
+                expectedZone: .rightBottom,
+                decision: decision,
+                responseLatencyMilliseconds: 75,
+                feature: feature
+            )]
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let decoded = try decoder.decode(EvaluationReport.self, from: report.jsonData())
+
+        XCTAssertEqual(decoded.records.first?.feature, feature)
+        XCTAssertEqual(decoded.calibrationCapturedAt, report.calibrationCapturedAt)
+    }
+
+    func testEvaluationJSONDecodesReportsWithoutRevisionOrReplayFields() throws {
+        let decision = ClassificationDecision(
+            zone: .leftBottom,
+            confidence: 0.75,
+            signalStrength: 0.7,
+            zoneDistances: [],
+            rejectionReason: nil
+        )
+        let report = EvaluationReport(
+            calibrationCapturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            profileName: "Legacy fixture",
+            strategy: .passive,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            records: [EvaluationRecord(
+                expectedZone: .leftBottom,
+                decision: decision,
+                responseLatencyMilliseconds: 80
+            )]
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: report.jsonData()) as? [String: Any]
+        )
+        object.removeValue(forKey: "calibrationCapturedAt")
+        var records = try XCTUnwrap(object["records"] as? [[String: Any]])
+        records[0].removeValue(forKey: "feature")
+        object["records"] = records
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let decoded = try decoder.decode(EvaluationReport.self, from: legacyData)
+
+        XCTAssertNil(decoded.calibrationCapturedAt)
+        XCTAssertNil(decoded.records.first?.feature)
+        XCTAssertEqual(decoded.records.first?.predictedZone, .leftBottom)
+    }
+
     func testAcceptanceTargetsAreReportedSeparatelyAndLatencyIsStrict() {
         let correct = ClassificationDecision(
             zone: .leftTop,
@@ -97,13 +206,17 @@ final class EvaluationTests: XCTestCase {
         XCTAssertTrue(invalidTiming.csv().contains("INVALID"))
     }
 
-    func testEvaluationHistoryReturnsLatestReportForSelectedProfileOnly() throws {
+    func testEvaluationHistoryReturnsLatestReportForExactCalibrationRevision() throws {
         let firstProfile = UUID()
         let secondProfile = UUID()
         let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let firstCalibration = base.addingTimeInterval(-100)
+        let oldCalibration = base.addingTimeInterval(-200)
+        let secondCalibration = base.addingTimeInterval(-300)
         let reports = [
             EvaluationReport(
                 profileID: firstProfile,
+                calibrationCapturedAt: oldCalibration,
                 profileName: "First",
                 strategy: .passive,
                 startedAt: base,
@@ -112,6 +225,7 @@ final class EvaluationTests: XCTestCase {
             ),
             EvaluationReport(
                 profileID: secondProfile,
+                calibrationCapturedAt: secondCalibration,
                 profileName: "Second",
                 strategy: .hybrid,
                 startedAt: base,
@@ -120,6 +234,7 @@ final class EvaluationTests: XCTestCase {
             ),
             EvaluationReport(
                 profileID: firstProfile,
+                calibrationCapturedAt: firstCalibration,
                 profileName: "First",
                 strategy: .active,
                 startedAt: base,
@@ -128,10 +243,23 @@ final class EvaluationTests: XCTestCase {
             )
         ]
 
-        let latest = try XCTUnwrap(EvaluationHistory.latest(for: firstProfile, in: reports))
+        let latest = try XCTUnwrap(EvaluationHistory.latest(
+            for: firstProfile,
+            calibrationCapturedAt: firstCalibration,
+            in: reports
+        ))
         XCTAssertEqual(latest.strategy, .active)
         XCTAssertEqual(latest.completedAt, base.addingTimeInterval(40))
-        XCTAssertNil(EvaluationHistory.latest(for: nil, in: reports))
+        XCTAssertNil(EvaluationHistory.latest(
+            for: firstProfile,
+            calibrationCapturedAt: base,
+            in: reports
+        ))
+        XCTAssertNil(EvaluationHistory.latest(
+            for: nil,
+            calibrationCapturedAt: firstCalibration,
+            in: reports
+        ))
     }
 
     func testApproachComparisonSelectsHighestMeasuredAccuracy() throws {
@@ -179,6 +307,8 @@ final class EvaluationTests: XCTestCase {
         XCTAssertTrue(alternatives.allSatisfy { passive.crossValidationAccuracy > $0.crossValidationAccuracy })
         XCTAssertEqual(comparison.topologyZoneCount, DeskZone.allCases.count)
         XCTAssertEqual(comparison.profileID, profileID)
+        XCTAssertEqual(comparison.featureSchemaVersion, TapFeatureVector.schemaVersion)
+        XCTAssertTrue(comparison.usesCurrentFeatureSchema)
         XCTAssertTrue(comparison.applies(to: profileID))
         XCTAssertFalse(comparison.applies(to: UUID()))
     }

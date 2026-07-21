@@ -3,7 +3,10 @@ import Foundation
 public struct SignalQuality: Codable, Equatable, Sendable {
     public static let minimumReliablePeakAmplitude = 0.003
     public static let maximumReliableClippingFraction = 0.20
-    public static let minimumClassificationSignalToNoiseDB = 6.0
+    // Onset-relative peak-to-pre-onset RMS. Five decibels still requires a
+    // clear 1.78x local contrast, while avoiding a second rejection for
+    // comfortable taps that already passed the filtered 2x onset detector.
+    public static let minimumClassificationSignalToNoiseDB = 5.0
 
     public var signalToNoiseDB: Double
     public var peakAmplitude: Double
@@ -46,7 +49,10 @@ public struct SignalQuality: Codable, Equatable, Sendable {
 }
 
 public struct TapFeatureVector: Codable, Equatable, Sendable {
-    public static let schemaVersion = 1
+    /// Version 2 binds features to fixed onset-relative candidate framing. The
+    /// vector names are unchanged, but version 1 values were measured from a
+    /// callback-relative window and must not be mixed into the same model.
+    public static let schemaVersion = 2
 
     public var version: Int
     public var strategy: SensingStrategy

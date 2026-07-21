@@ -10,6 +10,11 @@ struct LiveSurfaceView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(36)
                 .background(HoloTheme.background)
+        } else if !model.selectedProfileUsesCurrentFeatureSchema {
+            recalibrationPrompt
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(36)
+                .background(HoloTheme.background)
         } else {
             liveDesk
         }
@@ -60,6 +65,26 @@ struct LiveSurfaceView: View {
             .controlSize(.large)
         }
         .padding(.top, 4)
+    }
+
+    private var recalibrationPrompt: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Refresh this desk calibration")
+                .font(.title2.weight(.semibold))
+            Text("Tap windows are now aligned to each detected onset instead of the surrounding audio callback. The saved profile and actions are intact, but its classifier cannot be mixed with the new tap windows.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 500)
+            Button("Open Calibration") {
+                model.prepareRecalibration()
+            }
+            .holoPrimaryButton()
+            .controlSize(.large)
+        }
     }
 
     private var resultStrip: some View {

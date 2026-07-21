@@ -50,6 +50,67 @@ final class GuidedSessionTests: XCTestCase {
         XCTAssertEqual(session.progress, 1, accuracy: 0.0001)
     }
 
+    func testEvaluationAttemptStateRequiresMatchingIdentity() throws {
+        var session = EvaluationSession(targetPerZone: 1)
+        let attemptID = UUID()
+        let staleID = UUID()
+
+        XCTAssertEqual(session.beginAttempt(id: attemptID), attemptID)
+        XCTAssertNil(session.beginAttempt(id: staleID))
+        XCTAssertFalse(session.beginListening(id: staleID))
+        XCTAssertTrue(session.beginListening(id: attemptID))
+        XCTAssertFalse(session.beginResolving(id: staleID))
+        XCTAssertTrue(session.beginResolving(id: attemptID))
+        XCTAssertFalse(session.completeAttempt(id: staleID))
+        XCTAssertTrue(session.completeAttempt(id: attemptID))
+        XCTAssertEqual(session.attemptPhase, .ready)
+    }
+
+    func testEvaluationAttemptAcceptsOnlyEventsInsideItsMonotonicWindow() throws {
+        var session = EvaluationSession(targetPerZone: 1)
+        let attemptID = try XCTUnwrap(session.beginAttempt())
+        XCTAssertTrue(session.beginListening(id: attemptID))
+        let window = EvaluationAttemptWindow(
+            id: attemptID,
+            openedAtUptime: 100,
+            closesAtUptime: 101.5
+        )
+
+        XCTAssertFalse(session.acceptsObservation(in: window, eventHostTimeSeconds: 99.999))
+        XCTAssertTrue(session.acceptsObservation(in: window, eventHostTimeSeconds: 100))
+        XCTAssertTrue(session.acceptsObservation(in: window, eventHostTimeSeconds: 101.5))
+        XCTAssertFalse(session.acceptsObservation(in: window, eventHostTimeSeconds: 101.501))
+        XCTAssertFalse(session.acceptsObservation(in: window, eventHostTimeSeconds: .nan))
+
+        XCTAssertTrue(session.beginResolving(id: attemptID))
+        XCTAssertTrue(session.acceptsObservation(in: window, eventHostTimeSeconds: 101))
+        session.cancelAttempt()
+        XCTAssertFalse(session.acceptsObservation(in: window, eventHostTimeSeconds: 101))
+    }
+
+    func testEvaluationAttemptRecordsExactlyOneOutcomeAndMissesAdvance() throws {
+        var session = EvaluationSession(targetPerZone: 1)
+        let attemptID = try XCTUnwrap(session.beginAttempt())
+        XCTAssertTrue(session.beginListening(id: attemptID))
+        let missed = EvaluationRecord(
+            expectedZone: .leftTop,
+            decision: ClassificationDecision(
+                zone: nil,
+                confidence: 0,
+                signalStrength: 0,
+                zoneDistances: [],
+                rejectionReason: .missedDetection
+            ),
+            responseLatencyMilliseconds: AudioTimeline.invalidElapsedMilliseconds
+        )
+
+        XCTAssertTrue(session.record(missed, forAttempt: attemptID))
+        XCTAssertFalse(session.record(missed, forAttempt: attemptID))
+        XCTAssertEqual(session.records, [missed])
+        XCTAssertEqual(session.currentZone, .leftBottom)
+        XCTAssertEqual(session.attemptPhase, .ready)
+    }
+
     func testSensingComparisonCoversEveryStrategyAndZone() {
         var session = BenchmarkSession()
 

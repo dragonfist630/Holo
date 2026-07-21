@@ -39,6 +39,10 @@ struct DiagnosticsView: View {
                     LabeledContent("Analysis buffer", value: "\(model.audio.diagnostics.bufferFrameCount) frames")
                     LabeledContent("Reported input latency", value: String(format: "%.1f ms", model.audio.diagnostics.timing.estimatedInputLatencyMilliseconds))
                     LabeledContent("Callback jitter", value: String(format: "%.2f ms", model.audio.diagnostics.timing.callbackJitterMilliseconds))
+                    LabeledContent("Soft candidates", value: "\(model.audio.detectorStatistics.candidateCount)")
+                    LabeledContent("Noise peaks filtered", value: "\(model.audio.detectorStatistics.pendingRejectedCount)")
+                    LabeledContent("Sustained sounds filtered", value: "\(model.audio.detectorStatistics.impactRejectedCount)")
+                    LabeledContent("Tap windows emitted", value: "\(model.audio.detectorStatistics.emittedCount)")
                     Label(
                         "Holo uses only the channels exposed by AVAudioEngine; physical microphone-array access is not assumed.",
                         systemImage: "info.circle"
@@ -209,7 +213,14 @@ struct DiagnosticsView: View {
             }
 
             if let comparison = model.approachComparison {
-                if comparison.profileID != model.selectedProfile?.id {
+                if !comparison.usesCurrentFeatureSchema {
+                    Label(
+                        "This saved comparison predates the current tap framing. Run it again before using its sensing recommendation.",
+                        systemImage: "info.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if comparison.profileID != model.selectedProfile?.id {
                     Label(
                         "This saved comparison belongs to a different or unscoped desk setup. Run it again before using the result here.",
                         systemImage: "info.circle"

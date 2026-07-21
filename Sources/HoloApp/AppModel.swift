@@ -72,10 +72,10 @@ final class AppModel: ObservableObject {
     private let actionDispatcher = LocalActionDispatcher()
     private var recalibratingProfileID: UUID?
     private var calibrationAcceptAfter = Date.distantPast
-    private var evaluationAcceptAfter = Date.distantPast
     private var benchmarkAcceptAfter = Date.distantPast
     private var calibrationArmTask: Task<Void, Never>?
-    private var evaluationArmTask: Task<Void, Never>?
+    private var evaluationAttemptTask: Task<Void, Never>?
+    private var evaluationAttemptWindow: EvaluationAttemptWindow?
     private var benchmarkArmTask: Task<Void, Never>?
     private var activeZoneClearTask: Task<Void, Never>?
     private var pausedByUser = false
@@ -154,6 +154,16 @@ final class AppModel: ObservableObject {
         return profiles.first { $0.id == selectedProfileID }
     }
 
+    var selectedProfileUsesCurrentFeatureSchema: Bool {
+        selectedProfile?.classifier.usesCurrentFeatureSchema ?? false
+    }
+
+    var canStartEvaluationAttempt: Bool {
+        evaluationSession?.attemptPhase == .ready
+            && audio.isListening
+            && audio.strategy == targetStrategy
+    }
+
     var guidedSection: AppSection? {
         GuidedNavigationGate.guidedSection(
             calibrationActive: calibrationSession != nil,
@@ -185,8 +195,10 @@ final class AppModel: ObservableObject {
             try await audio.start(strategy: targetStrategy)
             if let zone = calibrationSession?.currentZone {
                 statusMessage = "Calibration ready • move to \(zone.displayName), then arm"
+            } else if selectedProfile != nil && !selectedProfileUsesCurrentFeatureSchema {
+                statusMessage = "Recalibration required • tap preprocessing changed"
             } else if let zone = evaluationSession?.currentZone {
-                statusMessage = "Accuracy test ready • move to \(zone.displayName), then arm"
+                statusMessage = "Accuracy test ready • move to \(zone.displayName), then start the next tap"
             } else if let benchmark = benchmarkSession,
                       let strategy = benchmark.currentStrategy,
                       let zone = benchmark.currentZone {
@@ -261,11 +273,13 @@ final class AppModel: ObservableObject {
     func beginCalibration(draft: CalibrationDraft, recalibrating: HoloProfile? = nil) {
         pausedByUser = false
         calibrationArmTask?.cancel()
-        evaluationArmTask?.cancel()
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptWindow = nil
         benchmarkArmTask?.cancel()
         calibrationDraft = draft
         recalibratingProfileID = recalibrating?.id
         calibrationSession = CalibrationSession(draft: draft)
+        audio.resetDetectorStatistics()
         calibrationValidation = nil
         guidedCaptureIssue = nil
         calibrationAcceptAfter = Date().addingTimeInterval(0.5)
@@ -446,6 +460,7 @@ final class AppModel: ObservableObject {
                 profiles.insert(profile, at: 0)
             }
             selectedProfileID = profile.id
+            refreshLatestEvaluation()
             calibrationArmTask?.cancel()
             calibrationSession = nil
             calibrationValidation = nil
@@ -463,8 +478,12 @@ final class AppModel: ObservableObject {
     }
 
     func beginEvaluation() {
-        guard selectedProfile != nil else {
+        guard let profile = selectedProfile else {
             errorMessage = "Calibrate a desk profile before evaluating it."
+            return
+        }
+        guard profile.classifier.usesCurrentFeatureSchema else {
+            errorMessage = "This profile was calibrated with an older tap window. Create a fresh calibration before evaluating it."
             return
         }
         pausedByUser = false
@@ -472,7 +491,8 @@ final class AppModel: ObservableObject {
         benchmarkSession = nil
         calibrationArmTask?.cancel()
         benchmarkArmTask?.cancel()
-        evaluationArmTask?.cancel()
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptWindow = nil
         latestEvaluation = nil
         latestEvaluationIsPersisted = false
         activeZoneClearTask?.cancel()
@@ -480,8 +500,9 @@ final class AppModel: ObservableObject {
         activeZone = nil
         lastDecision = nil
         evaluationSession = EvaluationSession()
+        audio.resetDetectorStatistics()
         section = .evaluate
-        statusMessage = "Accuracy test ready • move to Left Top, then arm"
+        statusMessage = "Accuracy test ready • move to \(DeskZone.leftTop.displayName), then start tap 1"
         Task {
             do { try await prepareGuidedAudio(to: targetStrategy) }
             catch is CancellationError { }
@@ -489,33 +510,66 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func armEvaluationZone() {
-        guard var session = evaluationSession, let zone = session.currentZone else { return }
-        evaluationArmTask?.cancel()
-        session.isArmed = false
-        session.isSettling = true
+    func startEvaluationAttempt() {
+        guard var session = evaluationSession,
+              let zone = session.currentZone,
+              audio.isListening,
+              audio.strategy == targetStrategy else { return }
+        let attemptID = UUID()
+        guard session.beginAttempt(id: attemptID) != nil else { return }
+
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptWindow = nil
         evaluationSession = session
-        statusMessage = "Get ready • accuracy test starts in one second"
-        evaluationArmTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            guard !Task.isCancelled,
-                  let self,
+        statusMessage = "Hold still • tap prompt starts shortly"
+        let strategy = targetStrategy
+
+        evaluationAttemptTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.nanoseconds(
+                    EvaluationAttemptTiming.preparationSeconds
+                ))
+            } catch { return }
+            guard let self,
                   var current = self.evaluationSession,
                   self.audio.isListening,
-                  self.audio.strategy == self.targetStrategy,
+                  self.audio.strategy == strategy,
                   current.currentZone == zone,
-                  current.isSettling else { return }
-            current.isSettling = false
-            current.isArmed = true
-            self.evaluationAcceptAfter = Date()
+                  current.beginListening(id: attemptID) else { return }
+
+            let openedAt = ProcessInfo.processInfo.systemUptime
+            self.evaluationAttemptWindow = EvaluationAttemptWindow(
+                id: attemptID,
+                openedAtUptime: openedAt,
+                closesAtUptime: openedAt + EvaluationAttemptTiming.listeningSeconds
+            )
             self.evaluationSession = current
             let count = current.records.filter { $0.expectedZone == zone }.count
-            self.statusMessage = "Accuracy test armed • \(zone.displayName) • \(count + 1)/\(current.targetPerZone)"
+            self.statusMessage = "Tap now • \(zone.displayName) • \(count + 1)/\(current.targetPerZone)"
+
+            do {
+                try await Task.sleep(nanoseconds: Self.nanoseconds(
+                    EvaluationAttemptTiming.listeningSeconds
+                ))
+            } catch { return }
+            guard var resolving = self.evaluationSession,
+                  resolving.beginResolving(id: attemptID) else { return }
+            self.evaluationSession = resolving
+            self.statusMessage = "Checking for the tap…"
+
+            do {
+                try await Task.sleep(nanoseconds: Self.nanoseconds(
+                    EvaluationAttemptTiming.processingGraceSeconds
+                ))
+            } catch { return }
+            self.recordMissedEvaluationAttempt(id: attemptID)
         }
     }
 
     func cancelEvaluation() {
-        evaluationArmTask?.cancel()
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptTask = nil
+        evaluationAttemptWindow = nil
         evaluationSession = nil
         activeZone = nil
         refreshLatestEvaluation()
@@ -525,14 +579,16 @@ final class AppModel: ObservableObject {
     func beginApproachBenchmark() {
         pausedByUser = false
         calibrationArmTask?.cancel()
-        evaluationArmTask?.cancel()
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptWindow = nil
         benchmarkArmTask?.cancel()
         calibrationSession = nil
         evaluationSession = nil
         benchmarkSession = BenchmarkSession()
+        audio.resetDetectorStatistics()
         guidedCaptureIssue = nil
         section = .diagnostics
-        statusMessage = "Sensing comparison ready • move to Left Top, then arm"
+        statusMessage = "Sensing comparison ready • move to \(DeskZone.leftTop.displayName), then arm"
         Task {
             do { try await prepareGuidedAudio(to: .passive) }
             catch is CancellationError { }
@@ -694,31 +750,21 @@ final class AppModel: ObservableObject {
             return
         }
 
-        if var evaluation = evaluationSession, let profile = selectedProfile, let expected = evaluation.currentZone {
-            guard evaluation.isArmed, Date() >= evaluationAcceptAfter else { return }
+        if let evaluation = evaluationSession, let profile = selectedProfile {
+            guard let window = evaluationAttemptWindow,
+                  evaluation.acceptsObservation(
+                    in: window,
+                    eventHostTimeSeconds: observation.eventHostTimeSeconds
+                  ) else { return }
             var decision = profile.classifier.predict(observation.feature)
             decision.processingLatencyMilliseconds = observation.processingLatencyMilliseconds
-            evaluation.records.append(EvaluationRecord(
-                expectedZone: expected,
+            recordEvaluation(
+                attemptID: window.id,
                 decision: decision,
-                responseLatencyMilliseconds: responseLatencyMilliseconds(for: observation)
-            ))
-            present(decision)
-            evaluationAcceptAfter = Date().addingTimeInterval(0.40)
-            let completedExpectedZone = evaluation.records.filter { $0.expectedZone == expected }.count == evaluation.targetPerZone
-            if completedExpectedZone {
-                evaluation.isArmed = false
-                evaluation.isSettling = false
-                activeZone = nil
-            }
-            evaluationSession = evaluation
-            if let next = evaluation.currentZone {
-                statusMessage = completedExpectedZone
-                    ? "Zone complete • move to \(next.displayName), then arm"
-                    : "Accuracy test • \(next.displayName) • \(evaluation.records.filter { $0.expectedZone == next }.count + 1)/\(evaluation.targetPerZone)"
-            } else {
-                finishEvaluation(evaluation)
-            }
+                responseLatencyMilliseconds: responseLatencyMilliseconds(for: observation),
+                feature: observation.feature,
+                capturedAt: observation.feature.capturedAt
+            )
             return
         }
 
@@ -778,7 +824,6 @@ final class AppModel: ObservableObject {
             guidedCaptureIssue = nil
             session.positiveSamples.append(LabeledTap(zone: zone, feature: observation.feature))
             let count = session.count(for: zone)
-            calibrationAcceptAfter = Date().addingTimeInterval(0.40)
             if let next = session.currentZone {
                 if count == session.targetPerZone {
                     session.isArmed = false
@@ -874,11 +919,12 @@ final class AppModel: ObservableObject {
         guard let profile = selectedProfile else { return }
         let report = EvaluationReport(
             profileID: profile.id,
+            calibrationCapturedAt: profile.calibration.capturedAt,
             profileName: profile.name,
             strategy: profile.sensingStrategy,
             startedAt: session.startedAt,
             records: session.records,
-            notes: "Guided held-out session; \(EvaluationAcceptance.tapsPerZone) taps per zone."
+            notes: "Guided held-out session; \(EvaluationAcceptance.tapsPerZone) prompted attempts per zone."
         )
         latestEvaluation = report
         latestEvaluationIsPersisted = false
@@ -901,6 +947,73 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func recordEvaluation(
+        attemptID: UUID,
+        decision: ClassificationDecision,
+        responseLatencyMilliseconds: Double,
+        feature: TapFeatureVector?,
+        capturedAt: Date
+    ) {
+        guard var evaluation = evaluationSession,
+              let expected = evaluation.currentZone else { return }
+
+        let record = EvaluationRecord(
+            id: attemptID,
+            expectedZone: expected,
+            decision: decision,
+            responseLatencyMilliseconds: responseLatencyMilliseconds,
+            feature: feature,
+            capturedAt: capturedAt
+        )
+        guard evaluation.record(record, forAttempt: attemptID) else { return }
+
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptTask = nil
+        evaluationAttemptWindow = nil
+
+        present(decision)
+
+        let completedExpectedZone = evaluation.records.filter {
+            $0.expectedZone == expected
+        }.count == evaluation.targetPerZone
+        if completedExpectedZone {
+            activeZone = nil
+        }
+        evaluationSession = evaluation
+
+        if let next = evaluation.currentZone {
+            let nextTap = evaluation.records.filter { $0.expectedZone == next }.count + 1
+            if completedExpectedZone {
+                statusMessage = decision.rejectionReason == .missedDetection
+                    ? "No tap detected • attempt counted • move to \(next.displayName)"
+                    : "Zone complete • move to \(next.displayName), then start the next tap"
+            } else {
+                statusMessage = decision.rejectionReason == .missedDetection
+                    ? "No tap detected • attempt counted • \(next.displayName) • tap \(nextTap)/\(evaluation.targetPerZone)"
+                    : "Accuracy test ready • \(next.displayName) • tap \(nextTap)/\(evaluation.targetPerZone)"
+            }
+        } else {
+            finishEvaluation(evaluation)
+        }
+    }
+
+    private func recordMissedEvaluationAttempt(id: UUID) {
+        let decision = ClassificationDecision(
+            zone: nil,
+            confidence: 0,
+            signalStrength: 0,
+            zoneDistances: [],
+            rejectionReason: .missedDetection
+        )
+        recordEvaluation(
+            attemptID: id,
+            decision: decision,
+            responseLatencyMilliseconds: AudioTimeline.invalidElapsedMilliseconds,
+            feature: nil,
+            capturedAt: Date()
+        )
+    }
+
     private var currentCaptureLabel: String {
         if let session = calibrationSession {
             if let zone = session.currentZone { return "calibration-\(zone.shortName)" }
@@ -919,6 +1032,10 @@ final class AppModel: ObservableObject {
         return formatter.string(from: Date())
     }
 
+    private static func nanoseconds(_ seconds: Double) -> UInt64 {
+        UInt64(max(seconds, 0) * 1_000_000_000)
+    }
+
     private func responseLatencyMilliseconds(for observation: TapObservation) -> Double {
         AudioTimeline.elapsedMilliseconds(
             since: observation.eventHostTimeSeconds,
@@ -929,6 +1046,7 @@ final class AppModel: ObservableObject {
     private func refreshLatestEvaluation() {
         latestEvaluation = EvaluationHistory.latest(
             for: selectedProfile?.id,
+            calibrationCapturedAt: selectedProfile?.calibration.capturedAt,
             in: evaluationHistory
         )
         latestEvaluationIsPersisted = latestEvaluation != nil
@@ -936,13 +1054,14 @@ final class AppModel: ObservableObject {
 
     private func disarmAllCaptureIntents() {
         calibrationArmTask?.cancel()
-        evaluationArmTask?.cancel()
+        evaluationAttemptTask?.cancel()
+        evaluationAttemptTask = nil
+        evaluationAttemptWindow = nil
         benchmarkArmTask?.cancel()
         calibrationSession?.isArmed = false
         calibrationSession?.isSettling = false
         calibrationSession?.negativeLabel = nil
-        evaluationSession?.isArmed = false
-        evaluationSession?.isSettling = false
+        evaluationSession?.cancelAttempt()
         benchmarkSession?.isArmed = false
         benchmarkSession?.isSettling = false
         diagnosticCaptureArmed = false

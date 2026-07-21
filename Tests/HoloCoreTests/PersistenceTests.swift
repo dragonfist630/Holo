@@ -38,6 +38,7 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(loaded.action(for: .leftTop).text, "Focus mode")
         XCTAssertEqual(loaded.action(for: .rightBottom).kind, .openApplication)
         XCTAssertEqual(loaded.action(for: .rightBottom).bookmarkData, Data([0x48, 0x4F, 0x4C, 0x4F]))
+        XCTAssertEqual(loaded.version, HoloProfile.currentVersion)
 
         let files = try FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)
         XCTAssertEqual(files.count, 1)
@@ -68,11 +69,62 @@ final class PersistenceTests: XCTestCase {
                 leaveOneOutAccuracy: nil
             )
         )
-        profile.version = HoloProfile.currentVersion - 1
+        profile.version = HoloProfile.legacyFeatureFramingVersion - 1
 
-        try store.save(profile)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(profile).write(
+            to: temporary.appendingPathComponent(profile.id.uuidString).appendingPathExtension("json"),
+            options: .atomic
+        )
 
         XCTAssertTrue(try store.loadAll().isEmpty)
+    }
+
+    func testProfileWithLegacyFeatureFramingRemainsAvailableForRecalibration() throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try ProfileStore(directory: temporary)
+        var classifier = try TrainedTapClassifier.train(positiveExamples: samples())
+        for index in classifier.positiveExamples.indices {
+            classifier.positiveExamples[index].feature.version = TapFeatureVector.schemaVersion - 1
+        }
+        var zones = DeskZone.allCases.map { ZoneConfiguration(zone: $0) }
+        zones[DeskZone.leftTop.rawValue].action = ZoneActionConfiguration(
+            kind: .copyText,
+            text: "Preserved action"
+        )
+        var profile = HoloProfile(
+            name: "Legacy framing",
+            surfaceDescription: "Wood",
+            laptopPositionNote: "Centered",
+            classifier: classifier,
+            calibration: CalibrationSummary(
+                sampleCount: DeskZone.allCases.count * 2,
+                samplesPerZone: Array(repeating: 2, count: DeskZone.allCases.count),
+                leaveOneOutAccuracy: 0.75
+            ),
+            zones: zones
+        )
+        profile.version = HoloProfile.legacyFeatureFramingVersion
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(profile).write(
+            to: temporary.appendingPathComponent(profile.id.uuidString).appendingPathExtension("json"),
+            options: .atomic
+        )
+        let loaded = try XCTUnwrap(store.loadAll().first)
+
+        XCTAssertEqual(loaded.id, profile.id)
+        XCTAssertEqual(loaded.version, HoloProfile.legacyFeatureFramingVersion)
+        XCTAssertEqual(loaded.classifier.featureSchemaVersion, TapFeatureVector.schemaVersion - 1)
+        XCTAssertFalse(loaded.classifier.usesCurrentFeatureSchema)
+        XCTAssertEqual(loaded.action(for: .leftTop).kind, .copyText)
+        XCTAssertEqual(loaded.action(for: .leftTop).text, "Preserved action")
+
+        try store.save(loaded)
+        XCTAssertEqual(try XCTUnwrap(store.loadAll().first).version, HoloProfile.currentVersion)
     }
 
     func testLegacyNineZoneValuesAreSkippedBeforeCurrentEnumDecoding() throws {
@@ -191,6 +243,7 @@ final class PersistenceTests: XCTestCase {
         let store = try EvaluationStore(directory: temporary)
         let profileID = UUID()
         let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let calibrationCapturedAt = timestamp.addingTimeInterval(-20)
         let decision = ClassificationDecision(
             zone: .rightBottom,
             confidence: 0.88,
@@ -200,6 +253,7 @@ final class PersistenceTests: XCTestCase {
         )
         let report = EvaluationReport(
             profileID: profileID,
+            calibrationCapturedAt: calibrationCapturedAt,
             profileName: "Oak",
             strategy: .passive,
             startedAt: timestamp.addingTimeInterval(-10),
@@ -220,11 +274,20 @@ final class PersistenceTests: XCTestCase {
 
         let loaded = try XCTUnwrap(store.loadAll().first)
         XCTAssertEqual(loaded.profileID, profileID)
+        XCTAssertEqual(loaded.calibrationCapturedAt, calibrationCapturedAt)
         XCTAssertEqual(loaded.profileName, "Oak")
         XCTAssertEqual(loaded.topologyZoneCount, DeskZone.allCases.count)
         XCTAssertEqual(loaded.records.count, 1)
         XCTAssertEqual(loaded.records.first?.predictedZone, .rightBottom)
         XCTAssertEqual(loaded.records.first?.responseLatencyMilliseconds, 123)
+        XCTAssertEqual(
+            EvaluationHistory.latest(
+                for: profileID,
+                calibrationCapturedAt: calibrationCapturedAt,
+                in: [loaded]
+            ),
+            loaded
+        )
     }
 
     func testEvaluationStoreSkipsReportsFromOlderTopologies() throws {
@@ -273,6 +336,14 @@ final class PersistenceTests: XCTestCase {
         try store.save(current)
         XCTAssertEqual(try store.load()?.topologyZoneCount, DeskZone.allCases.count)
         XCTAssertEqual(try store.load()?.profileID, profileID)
+        XCTAssertTrue(try XCTUnwrap(store.load()).usesCurrentFeatureSchema)
+
+        var legacyFraming = current
+        legacyFraming.featureSchemaVersion = nil
+        try store.save(legacyFraming)
+        let loadedLegacy = try XCTUnwrap(store.load())
+        XCTAssertFalse(loadedLegacy.usesCurrentFeatureSchema)
+        XCTAssertFalse(loadedLegacy.applies(to: profileID))
     }
 
     private func samples() -> [LabeledTap] {

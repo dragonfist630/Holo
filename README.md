@@ -12,21 +12,21 @@ Left Front     └─────────────┘      Right Front
                   Trackpad side
 ```
 
-Holo is a research prototype. Automated DSP tests pass, but useful accuracy still has to be measured on each real MacBook, desk, room, and laptop position. No physical accuracy claim is made without a saved 60-tap evaluation from that setup.
+Holo is a research prototype. Automated DSP tests pass, but useful accuracy still has to be measured on each real MacBook, desk, room, and laptop position. No physical accuracy claim is made without a saved 60-attempt evaluation from that setup.
 
-The requirement-by-requirement evidence ledger is in [ACCEPTANCE.md](ACCEPTANCE.md).
+The requirement-by-requirement evidence ledger is in [ACCEPTANCE.md](ACCEPTANCE.md). The recovered physical baseline, failure analysis, and controlled iteration protocol are in [ACCURACY.md](ACCURACY.md).
 
 ## What is implemented
 
 - Four fixed zones: rear and front zones on each side of the MacBook.
 - Explicitly armed calibration: ten accepted examples spread across each zone, 40 total, with clear retry guidance for weak, noisy, or clipped taps.
 - A calibration-consistency check that identifies and can redo the weakest zone before saving.
-- Adaptive streaming onset detection, sustained-sound rejection, and fixed 90 ms analysis windows.
+- Adaptive streaming onset detection, sustained-sound rejection, and onset-aligned 90 ms analysis windows with a fixed 12 ms pre-roll.
 - Passive tap acoustics, an optional active acoustic probe, and a hybrid mode.
 - Robust feature normalization, a regularized linear zone model backed by nearest-example novelty checks, ambiguity rejection, out-of-distribution rejection, and optional negative examples.
 - Per-profile actions: visual only, play a sound, copy or speak text, open a website, run a Shortcut, open an application or item, execute a shell command, or capture a screenshot. New zones default to visual-only until the user assigns a side effect.
-- Guided 60-tap held-out evaluation with per-zone accuracy, latency, rejected-tap counts, and a confusion matrix.
-- Saved evaluation history is restored after relaunch and scoped to the desk profile that produced it.
+- Guided 60-attempt held-out evaluation with per-zone accuracy, latency, separate detector-miss and classifier-rejection counts, and a confusion matrix.
+- Saved evaluation history is restored after relaunch and scoped to the exact calibration revision that produced it.
 - Signal diagnostics, labeled feature capture, approach comparison, JSON/CSV reports, and opt-in raw debug WAV capture.
 - Sandboxed, local persistence. Raw audio is discarded by default.
 - Core Audio route validation requires the built-in microphone for every mode and the built-in speakers for Active or Hybrid sensing.
@@ -78,7 +78,7 @@ xcodebuild \
 
 Talking, typing, touching the laptop, and room noise can be collected as negative examples after the four zones are complete. Talking is recommended: speak normally for a few seconds and Holo records only speech peaks that get past the impact gate. Negative examples intentionally do not have to pass the clean-tap quality gate. Only their feature vectors are persisted unless raw debug recording is separately enabled.
 
-Profiles from the obsolete six-zone and nine-zone topologies are intentionally ignored. Recalibrate rather than trying to reinterpret old samples as new physical zones.
+Profiles from the obsolete six-zone and nine-zone topologies are intentionally ignored. Profiles captured with the callback-relative version 1 feature framing remain available so their actions are not lost, but live recognition and evaluation require a fresh version 2 calibration. Newly saved profiles also use a version 4 storage envelope so a rolled-back build cannot silently classify old tap windows against a new model. Recalibrate rather than mixing feature distributions or trying to reinterpret old physical zones. Saved sensing comparisons from before feature versioning remain visible as historical results but cannot choose the new calibration strategy; run the comparison again or select Passive explicitly.
 
 While calibration, an accuracy test, or a sensing comparison is active, unrelated sidebar destinations and profile switching are disabled. Cancel or finish the guided capture first. Pausing the microphone disarms every pending capture, including rejection training. Changing profiles never turns a paused microphone back on; explicitly starting a guided capture does resume it.
 
@@ -108,15 +108,15 @@ Support is determined by a completed accuracy test on the exact setup, not by ma
 
 ## Evaluation
 
-Evaluation is separate from calibration and uses new taps. It guides fifteen taps per zone, 60 total. Each zone must be armed, preventing movement and interface sounds from being counted before the user is ready. A detected event made while armed is included even if the classifier rejects it; rejected taps therefore count as incorrect. Response latency runs from the audio tap buffer's monotonic `AVAudioTime` host timestamp through feature extraction, the main-thread handoff, and classification.
+Evaluation is separate from calibration and uses new taps. A profile captured before the onset-framing change must first be recalibrated; Holo keeps it available but will not mix version 1 calibration vectors with version 2 observations. The test guides fifteen prompted attempts per zone, 60 total. Start each attempt explicitly, hold still through a one-second preparation interval, then tap once during the 1.5-second **Tap now** window. The preparation interval covers a newly started detector's room-learning period, and sounds before the monotonic listening window cannot claim the attempt. A detector event whose audio timestamp falls inside the window is included even if processing finishes during the short grace period or the classifier rejects it. If no eligible event arrives, the app automatically records a detector miss. Rejections and misses both count as incorrect, so they cannot disappear from the denominator. Response latency runs from the audio tap buffer's monotonic `AVAudioTime` host timestamp through feature extraction, the main-thread handoff, and classification. A detector miss has no finite response latency and therefore cannot satisfy the combined accuracy-and-latency gate.
 
 The prototype acceptance targets are:
 
-- At least 80% overall accuracy over a balanced 60-tap session.
+- At least 80% overall accuracy over a balanced 60-attempt session.
 - Median response latency below 200 ms.
 - No crashes or unbounded memory growth during a 30-minute run.
 
-The app saves each completed evaluation as JSON and CSV. Reports include per-zone accuracy, the four-by-four confusion matrix, a rejected column, confidence, and response latency. The newest saved report for the selected profile is restored after relaunch; reports from another desk are never shown as the current result. Reports from an obsolete topology are skipped. If either file cannot be saved, the screen identifies the result as memory-only. Invalid host-clock timestamps are exported as `INVALID` and prevent the latency target from passing. Calibration cross-validation is shown only as a diagnostic; it is not a substitute for held-out evaluation.
+The app saves each completed evaluation as JSON and CSV. Reports include per-zone accuracy, the four-by-four confusion matrix, separate missed/rejected counts, confidence, and response latency. JSON also retains the extracted feature vector for each detected attempt so classifier changes can be replayed without retaining audio. The newest saved report is restored only when both its profile ID and calibration timestamp match the selected profile; recalibration makes earlier results historical instead of presenting them as current. Reports from another desk or an obsolete topology are never shown as the current result. If either file cannot be saved, the screen identifies the result as memory-only. Invalid host-clock timestamps are exported as `INVALID` and prevent the latency target from passing. Calibration cross-validation is shown only as a diagnostic; it is not a substitute for held-out evaluation.
 
 ## Sensing approaches
 
@@ -128,7 +128,9 @@ Before capture starts, Holo reads the default Core Audio input/output transport 
 
 The bottom status bar explicitly says when the speaker probe is active.
 
-Onset detection begins with a 0.75-second room-learning period, then adapts its noise floor while requiring a short, high-contrast onset. A second gate reviews the complete 90 ms candidate and rejects events whose effective duration, late energy, and weak early concentration clearly resemble sustained speech. Rejected sustained events also update the adaptive floor during their refractory period, preventing conversation from repeatedly re-arming capture. A separate low-pass path keeps the high-frequency probe from triggering its own capture. Accepted windows retain the untouched full-band channels for active-response feature extraction.
+Onset detection begins with a 0.75-second room-learning period and then adapts to the room. A peak at twice the learned floor, with a `0.0015` absolute minimum, arms a high-recall candidate. A 1 ms window must either rise 1.3× over the preceding 8 ms or contain a sparse peak 2.75× above that local reference. Unlike the old RMS/crest/strong-sample conjunction, this OR preserves rounded low-frequency desk rings and direct impacts whose mechanical path arrives several milliseconds later, while stopping stationary noise peaks from occupying a complete capture. Every validated candidate is framed with exactly 12 ms of pre-roll and a 90 ms analysis window, preventing callback phase from shifting the observation or removing its tail. A full-event gate rejects sustained sounds from onset contrast, duration, decay, early-energy, and short-plateau evidence. Rejected background events can update the bounded adaptive floor during their refractory period, while candidate impacts themselves cannot ratchet it upward. A separate low-pass onset path keeps the high-frequency probe from triggering capture; accepted windows retain untouched full-band channels for feature extraction.
+
+Tap quality is onset-relative as well: peak signal is compared with the preceding 12 ms of noise in the same full-band domain instead of diluting a brief impact across the complete 90 ms window. Calibration no longer adds a second silent 400 ms dead time on top of detector refractory behavior. Detector-stage counters in Calibration and Diagnostics show candidates, full-event rejections, and emitted tap windows so a physical miss can be localized without retaining audio.
 
 Diagnostics can collect three taps per zone for each approach—36 samples total—and compare leave-one-out accuracy and DSP processing latency. Every set is explicitly armed. The highest measured score becomes the suggested strategy for the next calibration, but the result is bound to the desk profile on which it was measured and cannot silently influence another profile.
 
@@ -187,7 +189,7 @@ Most recent automated check on macOS 26.5.2:
 
 - Debug and Release app builds: passed with no source warnings.
 - Static analyzer: passed.
-- Unit tests: 68 passed, 0 failed, 0 skipped.
+- Full Xcode test scheme: 94 passed, 0 failed, 0 skipped (85 core and 9 app tests).
 - Accelerated mixed four-zone synthetic soak at the production confidence threshold: 5,000 events in 0.8 seconds; 4,500/4,500 zone taps correct and 500/500 weak, noisy, clipped, schema-mismatched, or out-of-distribution challenges rejected; zero false accepts; RSS 6.7 → 7.0 MB (+0.3 MB).
 - Earlier all-positive 30-minute synthetic wall-clock soak: 17,186 events; 17,186 correct, 0 rejected, 0 wrong; RSS 6.7 → 6.4 MB (−0.3 MB). This predates the current four-zone topology and is retained only as historical stability evidence.
 - Read-only route check: MacBook Pro Microphone and MacBook Pro Speakers both reported as built-in; Passive, Active, and Hybrid ready.
@@ -253,7 +255,7 @@ For every supported Mac/desk combination:
 
 1. Run Diagnostics in a representative quiet and noisy environment.
 2. Calibrate all four zones with the final MacBook position.
-3. Run a new balanced 60-tap evaluation and retain its JSON/CSV report.
+3. Run a new balanced 60-attempt evaluation and retain its JSON/CSV report.
 4. Confirm at least 80% overall accuracy and median response below 200 ms.
 5. Run the live app for 30 minutes with representative taps, conversation, typing, laptop touches, and background noise while monitoring crashes, false triggers, and memory.
 

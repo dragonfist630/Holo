@@ -77,7 +77,10 @@ public struct CalibrationSummary: Codable, Equatable, Sendable {
 }
 
 public struct HoloProfile: Codable, Equatable, Sendable, Identifiable {
-    public static let currentVersion = 3
+    /// Version 4 prevents older binaries, whose classifier ignored feature
+    /// versions, from loading profiles trained with onset-relative features.
+    public static let currentVersion = 4
+    public static let legacyFeatureFramingVersion = 3
 
     public var version: Int
     public var id: UUID
@@ -170,7 +173,10 @@ public final class ProfileStore {
         return try files.compactMap { url in
             let data = try Data(contentsOf: url)
             let envelope = try JSONDecoder().decode(VersionEnvelope.self, from: data)
-            guard envelope.version == HoloProfile.currentVersion else { return nil }
+            guard envelope.version == HoloProfile.currentVersion
+                    || envelope.version == HoloProfile.legacyFeatureFramingVersion else {
+                return nil
+            }
             let profile = try decoder().decode(HoloProfile.self, from: data)
             guard profile.zones.count == requiredZones.count,
                   Set(profile.zones.map(\.zone)) == requiredZones else {
@@ -189,6 +195,10 @@ public final class ProfileStore {
 
     public func save(_ profile: HoloProfile) throws {
         var updated = profile
+        // Any write from this build upgrades the storage envelope. Older builds
+        // then skip the file rather than mixing their v1 observations with a v2
+        // classifier after a rollback.
+        updated.version = HoloProfile.currentVersion
         updated.updatedAt = Date()
         let data = try encoder().encode(updated)
         try data.write(to: url(for: updated.id), options: .atomic)
@@ -235,6 +245,11 @@ public final class ProfileStore {
         }
 
         let positives = classifier.positiveExamples
+        let allExamples = positives + classifier.negativeExamples
+        guard let featureVersion = positives.first?.feature.version,
+              allExamples.allSatisfy({ $0.feature.version == featureVersion }) else {
+            return false
+        }
         guard positives.allSatisfy({ $0.zone != nil }),
               classifier.negativeExamples.allSatisfy({ $0.zone == nil }),
               Set(positives.compactMap(\.zone)) == requiredZones,
@@ -244,7 +259,7 @@ public final class ProfileStore {
             return false
         }
 
-        return (positives + classifier.negativeExamples).allSatisfy { example in
+        return allExamples.allSatisfy { example in
             let feature = example.feature
             return feature.strategy == classifier.strategy
                 && feature.names == classifier.featureNames

@@ -26,7 +26,11 @@ final class GuidedCaptureQualityTests: XCTestCase {
 
     func testRejectsNoisyTap() {
         XCTAssertEqual(
-            GuidedCaptureQuality.issue(for: quality(snr: 6.9, peak: 0.02, clipping: 0)),
+            GuidedCaptureQuality.issue(for: quality(
+                snr: GuidedCaptureQuality.minimumSignalToNoiseDB - 0.1,
+                peak: 0.02,
+                clipping: 0
+            )),
             .noisy
         )
     }

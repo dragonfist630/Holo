@@ -82,16 +82,26 @@ public struct TapFeatureExtractor: Sendable {
             selected = (passive.names + active.names, passive.values + active.values)
         }
 
-        let rms = rootMeanSquare(mono)
-        let peak = mono.map(abs).max() ?? 0
+        let onset = min(max(event.onsetOffset, 0), max(mono.count - 1, 0))
+        let preStart = max(0, onset - Int(sampleRate * 0.012))
+        let impactEnd = min(mono.count, onset + Int(sampleRate * 0.025))
+        let preOnset = onset > preStart ? Array(mono[preStart..<onset]) : []
+        let impact = impactEnd > onset ? Array(mono[onset..<impactEnd]) : mono
+        let rms = rootMeanSquare(impact)
+        let peak = impact.map(abs).max() ?? 0
         let clipping = Double(mono.filter { abs($0) >= 0.995 }.count) / Double(max(mono.count, 1))
-        let snr = 20 * log10(max(rms, 1e-12) / max(event.noiseFloorRMS, 1e-12))
+        // Compare the onset peak with pre-onset RMS in the same full-band
+        // signal. The old metric divided whole-window/full-band RMS by the
+        // detector's callback/sub-6-kHz floor, diluting a 3 ms impact by about
+        // 15 dB and then silently rejecting it during calibration and live use.
+        let localNoiseRMS = max(rootMeanSquare(preOnset), 1e-12)
+        let snr = 20 * log10(max(peak, 1e-12) / localNoiseRMS)
         let quality = SignalQuality(
             signalToNoiseDB: snr,
             peakAmplitude: peak,
             rmsAmplitude: rms,
             clippingFraction: clipping,
-            noiseFloorRMS: event.noiseFloorRMS,
+            noiseFloorRMS: localNoiseRMS,
             durationMilliseconds: Double(mono.count) / sampleRate * 1_000
         )
 

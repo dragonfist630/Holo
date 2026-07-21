@@ -15,6 +15,15 @@ struct EvaluationView: View {
                     Button("Open Calibration") { model.section = .calibrate }
                         .holoPrimaryButton()
                 }
+            } else if !model.selectedProfileUsesCurrentFeatureSchema {
+                ContentUnavailableView {
+                    Label("Fresh Calibration Required", systemImage: "arrow.triangle.2.circlepath")
+                } description: {
+                    Text("Tap windows are now aligned to each detected onset instead of the surrounding audio callback. Create a new calibration before measuring accuracy; the existing profile remains saved.")
+                } actions: {
+                    Button("Open Calibration") { model.prepareRecalibration() }
+                        .holoPrimaryButton()
+                }
             } else if let session = model.evaluationSession {
                 activeSession(session)
             } else if let report = model.latestEvaluation {
@@ -36,7 +45,7 @@ struct EvaluationView: View {
             VStack(spacing: 7) {
                 Text("Test your calibration")
                     .font(.title.weight(.semibold))
-                Text("Use new taps that were not part of calibration. Holo guides \(EvaluationAcceptance.tapsPerZone) taps in each zone and counts rejected taps as incorrect.")
+                Text("Use new taps that were not part of calibration. Holo guides \(EvaluationAcceptance.tapsPerZone) attempts in each zone and counts rejected or undetected taps as incorrect.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -45,7 +54,7 @@ struct EvaluationView: View {
 
             Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 10) {
                 acceptanceRow(
-                    "Taps",
+                    "Attempts",
                     "\(DeskZone.allCases.count * EvaluationAcceptance.tapsPerZone) total · \(EvaluationAcceptance.tapsPerZone) per zone"
                 )
                 acceptanceRow(
@@ -104,20 +113,21 @@ struct EvaluationView: View {
                 .frame(maxWidth: 760)
 
                 VStack(spacing: 14) {
-                    if session.isSettling {
+                    switch session.attemptPhase {
+                    case .preparing:
                         HStack(spacing: 9) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Preparing the microphone…")
+                            Text("Hold still…")
                                 .font(.headline)
                         }
                         .accessibilityElement(children: .combine)
-                    } else if session.isArmed {
+                    case .listening:
                         HStack(spacing: 8) {
                             Circle()
                                 .fill(.red)
                                 .frame(width: 7, height: 7)
-                            Text("Accuracy test armed")
+                            Text("Tap now")
                                 .font(.headline)
                             if let zone = session.currentZone {
                                 let count = session.records.filter { $0.expectedZone == zone }.count
@@ -127,19 +137,30 @@ struct EvaluationView: View {
                             }
                         }
                         .accessibilityElement(children: .combine)
-                    } else if let zone = session.currentZone {
-                        Text("Move to \(zone.displayName.lowercased()). Sounds are ignored until you arm this zone.")
+                    case .resolving:
+                        HStack(spacing: 9) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Checking for the tap…")
+                                .font(.headline)
+                        }
+                        .accessibilityElement(children: .combine)
+                    case .ready:
+                        if let zone = session.currentZone {
+                            let count = session.records.filter { $0.expectedZone == zone }.count
+                            Text("Move to \(zone.displayName.lowercased()), then start one prompted attempt. Sounds outside its listening window are ignored.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
-                        Button("Arm \(zone.displayName)") { model.armEvaluationZone() }
-                            .holoPrimaryButton()
-                            .controlSize(.large)
-                            .disabled(!model.audio.isListening)
-                            .help(model.audio.isListening ? "Start testing this zone" : "Resume the microphone before arming")
-                            .accessibilityHint(model.audio.isListening
-                                ? "Starts listening for evaluation taps in this zone."
-                                : "The microphone is paused. Resume it before arming.")
+                            Button("Start Tap \(count + 1)") { model.startEvaluationAttempt() }
+                                .holoPrimaryButton()
+                                .controlSize(.large)
+                                .disabled(!model.canStartEvaluationAttempt)
+                                .help(model.canStartEvaluationAttempt ? "Open one timed tap attempt" : "Wait for the correct microphone strategy to become ready")
+                                .accessibilityHint(model.canStartEvaluationAttempt
+                                    ? "Starts one timed listening window for this tap."
+                                    : "Wait for the microphone to become ready.")
+                        }
                     }
 
                     HStack(spacing: 20) {
@@ -148,7 +169,12 @@ struct EvaluationView: View {
                             : Double(session.records.filter(\.isCorrect).count) / Double(session.records.count)
                         LabeledContent("Accuracy so far", value: "\(Int(accuracy * 100))%")
                         if let decision = model.lastDecision {
-                            LabeledContent("Last result", value: decision.zone?.displayName ?? "Rejected")
+                            LabeledContent(
+                                "Last result",
+                                value: decision.zone?.displayName
+                                    ?? decision.rejectionReason?.displayName
+                                    ?? "Rejected"
+                            )
                         }
                         Spacer()
                         Button("Cancel", role: .cancel) { model.cancelEvaluation() }
@@ -162,6 +188,7 @@ struct EvaluationView: View {
             .padding(32)
             .frame(maxWidth: .infinity)
         }
+        .scrollDisabled(session.attemptPhase.isInFlight)
     }
 
     private func reportView(_ report: EvaluationReport) -> some View {
@@ -201,7 +228,8 @@ struct EvaluationView: View {
                                 ? "\(DeskZone.allCases.count) × \(EvaluationAcceptance.tapsPerZone)"
                                 : "No"
                         )
-                        summaryRow("Rejected taps", "\(report.records.filter { $0.predictedZone == nil }.count)")
+                        summaryRow("Missed detections", "\(report.missedDetectionCount)")
+                        summaryRow("Classifier rejections", "\(report.classifierRejectionCount)")
                     }
                     .font(.callout)
                 }
@@ -320,6 +348,9 @@ struct EvaluationView: View {
 
     private func latencySummary(_ report: EvaluationReport) -> String {
         guard report.hasCompleteResponseLatency else {
+            if report.missedDetectionCount > 0 {
+                return "Unavailable · \(report.missedDetectionCount) attempts had no detector response"
+            }
             return "Unavailable · one or more timestamps were invalid"
         }
         return String(

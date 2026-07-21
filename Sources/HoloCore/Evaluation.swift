@@ -14,12 +14,16 @@ public struct EvaluationRecord: Codable, Equatable, Sendable, Identifiable {
     public var responseLatencyMilliseconds: Double
     public var rejectionReason: RejectionReason?
     public var capturedAt: Date
+    /// Feature-only evidence for replaying classifier challengers. Raw audio is
+    /// still stored only when the user separately enables debug recording.
+    public var feature: TapFeatureVector?
 
     public init(
         id: UUID = UUID(),
         expectedZone: DeskZone,
         decision: ClassificationDecision,
         responseLatencyMilliseconds: Double,
+        feature: TapFeatureVector? = nil,
         capturedAt: Date = Date()
     ) {
         self.id = id
@@ -29,6 +33,7 @@ public struct EvaluationRecord: Codable, Equatable, Sendable, Identifiable {
         self.responseLatencyMilliseconds = responseLatencyMilliseconds
         self.rejectionReason = decision.rejectionReason
         self.capturedAt = capturedAt
+        self.feature = feature
     }
 
     public var isCorrect: Bool { expectedZone == predictedZone }
@@ -45,6 +50,9 @@ public struct ZoneAccuracy: Codable, Equatable, Sendable, Identifiable {
 public struct EvaluationReport: Codable, Equatable, Sendable {
     public var topologyZoneCount: Int?
     public var profileID: UUID?
+    /// A profile ID survives recalibration so actions remain attached. This
+    /// timestamp binds the report to the exact calibration/model revision.
+    public var calibrationCapturedAt: Date?
     public var profileName: String
     public var strategy: SensingStrategy
     public var startedAt: Date
@@ -55,6 +63,7 @@ public struct EvaluationReport: Codable, Equatable, Sendable {
     public init(
         topologyZoneCount: Int? = DeskZone.allCases.count,
         profileID: UUID? = nil,
+        calibrationCapturedAt: Date? = nil,
         profileName: String,
         strategy: SensingStrategy,
         startedAt: Date,
@@ -64,6 +73,7 @@ public struct EvaluationReport: Codable, Equatable, Sendable {
     ) {
         self.topologyZoneCount = topologyZoneCount
         self.profileID = profileID
+        self.calibrationCapturedAt = calibrationCapturedAt
         self.profileName = profileName
         self.strategy = strategy
         self.startedAt = startedAt
@@ -103,6 +113,16 @@ public struct EvaluationReport: Codable, Equatable, Sendable {
         DeskZone.allCases.map { zone in
             records.filter { $0.expectedZone == zone && $0.predictedZone == nil }.count
         }
+    }
+
+    public var missedDetectionCount: Int {
+        records.filter { $0.rejectionReason == .missedDetection }.count
+    }
+
+    public var classifierRejectionCount: Int {
+        records.filter {
+            $0.predictedZone == nil && $0.rejectionReason != .missedDetection
+        }.count
     }
 
     public var isBalancedAcceptanceSession: Bool {
@@ -172,11 +192,15 @@ public struct EvaluationReport: Codable, Equatable, Sendable {
 public enum EvaluationHistory {
     public static func latest(
         for profileID: UUID?,
+        calibrationCapturedAt: Date?,
         in reports: [EvaluationReport]
     ) -> EvaluationReport? {
-        guard let profileID else { return nil }
+        guard let profileID, let calibrationCapturedAt else { return nil }
         return reports
-            .filter { $0.profileID == profileID }
+            .filter {
+                $0.profileID == profileID
+                    && $0.calibrationCapturedAt == calibrationCapturedAt
+            }
             .max { $0.completedAt < $1.completedAt }
     }
 }
@@ -253,19 +277,23 @@ public struct ApproachComparison: Codable, Equatable, Sendable {
     public var measuredAt: Date
     public var topologyZoneCount: Int?
     public var profileID: UUID?
+    /// Nil on reports saved before feature framing was versioned.
+    public var featureSchemaVersion: Int?
 
     public init(
         scores: [ApproachScore],
         selectedStrategy: SensingStrategy,
         measuredAt: Date,
         topologyZoneCount: Int? = DeskZone.allCases.count,
-        profileID: UUID? = nil
+        profileID: UUID? = nil,
+        featureSchemaVersion: Int? = TapFeatureVector.schemaVersion
     ) {
         self.scores = scores
         self.selectedStrategy = selectedStrategy
         self.measuredAt = measuredAt
         self.topologyZoneCount = topologyZoneCount
         self.profileID = profileID
+        self.featureSchemaVersion = featureSchemaVersion
     }
 
     public static func measure(
@@ -309,6 +337,10 @@ public struct ApproachComparison: Codable, Equatable, Sendable {
     }
 
     public func applies(to profileID: UUID?) -> Bool {
-        self.profileID == profileID
+        self.profileID == profileID && usesCurrentFeatureSchema
+    }
+
+    public var usesCurrentFeatureSchema: Bool {
+        featureSchemaVersion == TapFeatureVector.schemaVersion
     }
 }

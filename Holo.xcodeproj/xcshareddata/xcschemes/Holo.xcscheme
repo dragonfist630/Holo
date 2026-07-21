@@ -64,6 +64,17 @@
                ReferencedContainer = "container:Holo.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "9F16F8CF8BEC21D76AE06244"
+               BuildableName = "HoloAppTests.xctest"
+               BlueprintName = "HoloAppTests"
+               ReferencedContainer = "container:Holo.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>
