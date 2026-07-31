@@ -160,12 +160,7 @@ public struct EvaluationReport: Codable, Equatable, Sendable {
     }
 
     private static func median(_ values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        if sorted.count.isMultiple(of: 2) {
-            return (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
-        }
-        return sorted[sorted.count / 2]
+        values.median()
     }
 }
 
@@ -277,12 +272,8 @@ public struct ApproachComparison: Codable, Equatable, Sendable {
             let matching = samples.filter { $0.labeledTap.feature.strategy == strategy }
             guard !matching.isEmpty else { continue }
             let validation = try ClassifierEvaluator.leaveOneOut(matching.map(\.labeledTap))
-            let latencies = matching.map(\.processingLatencyMilliseconds).sorted()
-            let median: Double
-            if latencies.isEmpty { median = 0 }
-            else if latencies.count.isMultiple(of: 2) {
-                median = (latencies[latencies.count / 2 - 1] + latencies[latencies.count / 2]) / 2
-            } else { median = latencies[latencies.count / 2] }
+            let latencies = matching.map(\.processingLatencyMilliseconds)
+            let median = latencies.median()
             scores.append(ApproachScore(
                 strategy: strategy,
                 crossValidationAccuracy: validation.accuracy,

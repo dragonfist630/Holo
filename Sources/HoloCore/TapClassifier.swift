@@ -452,12 +452,7 @@ public struct TrainedTapClassifier: Codable, Equatable, Sendable {
     }
 
     private static func median(_ values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        if sorted.count.isMultiple(of: 2) {
-            return (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
-        }
-        return sorted[sorted.count / 2]
+        values.median()
     }
 
     private static func quantile(_ values: [Double], probability: Double) -> Double {
